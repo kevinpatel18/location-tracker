@@ -9,23 +9,33 @@ const LocationTracker = () => {
   const [isTracking, setIsTracking] = useState(false);
   const [error, setError] = useState(null);
   const [watchId, setWatchId] = useState(null);
-  const [debugInfo, setDebugInfo] = useState(""); // Add debug info state
 
   const defaultCenter = { lat: 22.3072, lng: 73.1812 };
 
-  // Simplified distance check
+  // Function to round coordinates to 4 decimal places (approximately 11 meters)
+  const roundCoordinate = (coord) => {
+    return Number(coord.toFixed(4));
+  };
+
+  // Function to check if a new location is significantly different
   const isSignificantMove = (newLocation, lastLocation) => {
     if (!lastLocation) return true;
     
-    // Simplified distance check using coordinate differences
-    const latDiff = Math.abs(newLocation.lat - lastLocation.lat);
-    const lngDiff = Math.abs(newLocation.lng - lastLocation.lng);
+    // Round both coordinates to reduce noise
+    const roundedNew = {
+      lat: roundCoordinate(newLocation.lat),
+      lng: roundCoordinate(newLocation.lng)
+    };
     
-    // Return true if movement is more than 0.00001 degrees (roughly 1 meter)
-    return latDiff > 0.00001 || lngDiff > 0.00001;
+    const roundedLast = {
+      lat: roundCoordinate(lastLocation.lat),
+      lng: roundCoordinate(lastLocation.lng)
+    };
+    
+    // Only return true if the rounded coordinates are different
+    return roundedNew.lat !== roundedLast.lat || roundedNew.lng !== roundedLast.lng;
   };
 
-  // Function to handle starting location tracking
   const startTracking = () => {
     if (!navigator.geolocation) {
       setError("Geolocation is not supported by your browser");
@@ -33,25 +43,6 @@ const LocationTracker = () => {
     }
 
     setIsTracking(true);
-    setDebugInfo("Starting tracking..."); // Debug info
-    
-    // Get initial position
-    navigator.geolocation.getCurrentPosition(
-      (position) => {
-        const initialLocation = {
-          lat: position.coords.latitude,
-          lng: position.coords.longitude,
-          timestamp: Date.now(),
-          accuracy: position.coords.accuracy
-        };
-        setPath([initialLocation]);
-        setDebugInfo(prev => prev + "\nGot initial position: " + JSON.stringify(initialLocation));
-      },
-      (err) => {
-        setError(`Initial position error: ${err.message}`);
-        setDebugInfo(prev => prev + "\nInitial position error: " + err.message);
-      }
-    );
     
     // Watch position and update path
     const id = navigator.geolocation.watchPosition(
@@ -63,17 +54,17 @@ const LocationTracker = () => {
           accuracy: position.coords.accuracy
         };
         
-        setDebugInfo(prev => prev + "\nNew location received: " + JSON.stringify(newLocation));
-        
         setPath((currentPath) => {
           const lastLocation = currentPath[currentPath.length - 1];
           
-          // Always add the first point or if it's a significant move
-          if (!lastLocation || isSignificantMove(newLocation, lastLocation)) {
-            setDebugInfo(prev => prev + "\nAdding new point to path");
-            return [...currentPath, newLocation];
+          // Only add point if it's significantly different from the last one
+          if (isSignificantMove(newLocation, lastLocation)) {
+            return [...currentPath, {
+              ...newLocation,
+              lat: roundCoordinate(newLocation.lat),
+              lng: roundCoordinate(newLocation.lng)
+            }];
           }
-          setDebugInfo(prev => prev + "\nIgnoring duplicate location");
           return currentPath;
         });
         
@@ -82,11 +73,11 @@ const LocationTracker = () => {
       (err) => {
         console.error("Error getting location:", err);
         setError(`Failed to get location: ${err.message}`);
-        setDebugInfo(prev => prev + "\nLocation error: " + err.message);
+        stopTracking();
       },
       {
         enableHighAccuracy: true,
-        timeout: 10000, // Increased timeout
+        timeout: 5000,
         maximumAge: 0
       }
     );
@@ -100,7 +91,6 @@ const LocationTracker = () => {
       setWatchId(null);
     }
     setIsTracking(false);
-    setDebugInfo(prev => prev + "\nTracking stopped");
   };
 
   useEffect(() => {
@@ -137,7 +127,7 @@ const LocationTracker = () => {
 
       <MapContainer
         center={center}
-        zoom={14}
+        zoom={16}
         style={{ height: "500px", width: "100%" }}
         scrollWheelZoom={true}
       >
@@ -156,9 +146,8 @@ const LocationTracker = () => {
           >
             <Popup>
               Location {index + 1}<br/>
-              Lat: {pos.lat.toFixed(6)}<br/>
-              Lng: {pos.lng.toFixed(6)}<br/>
-              Accuracy: {pos.accuracy?.toFixed(2)}m<br/>
+              Lat: {pos.lat}<br/>
+              Lng: {pos.lng}<br/>
               Time: {new Date(pos.timestamp).toLocaleTimeString()}
             </Popup>
           </Marker>
@@ -172,26 +161,16 @@ const LocationTracker = () => {
         <div className="max-h-40 overflow-y-auto">
           {path.map((pos, index) => (
             <div key={index} className="text-sm">
-              Point {index + 1}: Lat: {pos.lat.toFixed(6)}, Lng: {pos.lng.toFixed(6)}, 
-              Accuracy: {pos.accuracy?.toFixed(2)}m, 
+              Point {index + 1}: Lat: {pos.lat}, Lng: {pos.lng}, 
               Time: {new Date(pos.timestamp).toLocaleTimeString()}
             </div>
           ))}
         </div>
       </div>
-
-      {/* Debug Information */}
-      <div className="mt-4 p-4 bg-gray-100 rounded">
-        <h2 className="font-semibold mb-2">Debug Info:</h2>
-        <pre className="text-xs whitespace-pre-wrap">
-          {debugInfo}
-        </pre>
-      </div>
     </div>
   );
 };
 
-// AutoCenter component to keep the map centered on the latest position
 const AutoCenter = ({ position }) => {
   const map = useMap();
 
