@@ -6,36 +6,126 @@ import "leaflet-polylinedecorator";
 
 const LocationTracker = () => {
   const [path, setPath] = useState([]);
+  console.log('path: ', path);
   const [isTracking, setIsTracking] = useState(false);
   const [error, setError] = useState(null);
   const [watchId, setWatchId] = useState(null);
-  const [debugInfo, setDebugInfo] = useState(""); // Add debug info state
+  const [debugInfo, setDebugInfo] = useState("");
+  const [isBackgroundSupported, setIsBackgroundSupported] = useState(false);
+  const [serviceWorkerReg, setServiceWorkerReg] = useState(null);
 
   const defaultCenter = { lat: 22.3072, lng: 73.1812 };
 
-  // Simplified distance check
+  // Register Service Worker
+  useEffect(() => {
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/service-worker.js')
+        .then(registration => {
+          setServiceWorkerReg(registration);
+          setDebugInfo(prev => prev + "\nService Worker registered");
+        })
+        .catch(error => {
+          console.error('Service Worker registration failed:', error);
+          setDebugInfo(prev => prev + "\nService Worker registration failed: " + error.message);
+        });
+    }
+  }, []);
+
+  // Check for background location support
+  useEffect(() => {
+    checkBackgroundSupport();
+  }, []);
+
+  const checkBackgroundSupport = async () => {
+    if ('permissions' in navigator) {
+      try {
+        const result = await navigator.permissions.query({ name: 'geolocation' });
+        setIsBackgroundSupported(true);
+        setDebugInfo("Background location supported");
+      } catch (err) {
+        setIsBackgroundSupported(false);
+        setDebugInfo("Background location not supported");
+      }
+    }
+  };
+
   const isSignificantMove = (newLocation, lastLocation) => {
     if (!lastLocation) return true;
-    
-    // Simplified distance check using coordinate differences
     const latDiff = Math.abs(newLocation.lat - lastLocation.lat);
     const lngDiff = Math.abs(newLocation.lng - lastLocation.lng);
-    
-    // Return true if movement is more than 0.00001 degrees (roughly 1 meter)
     return latDiff > 0.00001 || lngDiff > 0.00001;
   };
 
-  // Function to handle starting location tracking
-  const startTracking = () => {
+  // Store location data in localStorage
+  const saveLocationToStorage = (location) => {
+    try {
+      const storedPath = JSON.parse(localStorage.getItem('locationPath') || '[]');
+      storedPath.push(location);
+      localStorage.setItem('locationPath', JSON.stringify(storedPath));
+      setDebugInfo(prev => prev + "\nLocation saved to storage");
+    } catch (err) {
+      console.error('Error saving to storage:', err);
+    }
+  };
+
+  // Load locations from storage on start
+  useEffect(() => {
+    try {
+      const storedPath = JSON.parse(localStorage.getItem('locationPath') || '[]');
+      if (storedPath.length > 0) {
+        setPath(storedPath);
+        setDebugInfo("Loaded stored locations: " + storedPath.length);
+      }
+    } catch (err) {
+      console.error('Error loading from storage:', err);
+    }
+  }, []);
+
+  // Background tracking setup
+  const setupBackgroundTracking = () => {
+    // Request wake lock to prevent device sleep
+    if ('wakeLock' in navigator) {
+      navigator.wakeLock.request('screen')
+        .then(lock => {
+          setDebugInfo(prev => prev + "\nWake lock acquired");
+        })
+        .catch(err => {
+          setDebugInfo(prev => prev + "\nWake lock error: " + err.message);
+        });
+    }
+
+    // Set up background sync if service worker is available
+    if (serviceWorkerReg && 'sync' in serviceWorkerReg) {
+      serviceWorkerReg.sync.register('locationSync')
+        .then(() => {
+          setDebugInfo(prev => prev + "\nBackground sync registered");
+        })
+        .catch(err => {
+          setDebugInfo(prev => prev + "\nBackground sync error: " + err.message);
+        });
+    }
+  };
+
+  const startTracking = async () => {
     if (!navigator.geolocation) {
-      setError("Geolocation is not supported by your browser");
+      setError("Geolocation is not supported");
       return;
     }
 
+    // Request permission for background location
+    if ('permissions' in navigator) {
+      try {
+        await navigator.permissions.query({ name: 'geolocation' });
+      } catch (err) {
+        setError("Background location permission denied");
+        return;
+      }
+    }
+
     setIsTracking(true);
-    setDebugInfo("Starting tracking..."); // Debug info
+    setupBackgroundTracking();
     
-    // Get initial position
+    // Initial position
     navigator.geolocation.getCurrentPosition(
       (position) => {
         const initialLocation = {
@@ -45,15 +135,13 @@ const LocationTracker = () => {
           accuracy: position.coords.accuracy
         };
         setPath([initialLocation]);
-        setDebugInfo(prev => prev + "\nGot initial position: " + JSON.stringify(initialLocation));
+        saveLocationToStorage(initialLocation);
       },
-      (err) => {
-        setError(`Initial position error: ${err.message}`);
-        setDebugInfo(prev => prev + "\nInitial position error: " + err.message);
-      }
+      (err) => setError(`Initial position error: ${err.message}`),
+      { enableHighAccuracy: true }
     );
     
-    // Watch position and update path
+    // Continuous tracking
     const id = navigator.geolocation.watchPosition(
       (position) => {
         const newLocation = {
@@ -63,30 +151,21 @@ const LocationTracker = () => {
           accuracy: position.coords.accuracy
         };
         
-        setDebugInfo(prev => prev + "\nNew location received: " + JSON.stringify(newLocation));
-        
         setPath((currentPath) => {
           const lastLocation = currentPath[currentPath.length - 1];
-          
-          // Always add the first point or if it's a significant move
           if (!lastLocation || isSignificantMove(newLocation, lastLocation)) {
-            setDebugInfo(prev => prev + "\nAdding new point to path");
+            saveLocationToStorage(newLocation);
             return [...currentPath, newLocation];
           }
-          setDebugInfo(prev => prev + "\nIgnoring duplicate location");
           return currentPath;
         });
-        
-        setError(null);
       },
       (err) => {
-        console.error("Error getting location:", err);
-        setError(`Failed to get location: ${err.message}`);
-        setDebugInfo(prev => prev + "\nLocation error: " + err.message);
+        setError(`Location error: ${err.message}`);
       },
       {
         enableHighAccuracy: true,
-        timeout: 10000, // Increased timeout
+        timeout: 30000,
         maximumAge: 0
       }
     );
@@ -100,13 +179,20 @@ const LocationTracker = () => {
       setWatchId(null);
     }
     setIsTracking(false);
-    setDebugInfo(prev => prev + "\nTracking stopped");
+    
+    // Release wake lock if acquired
+    if ('wakeLock' in navigator) {
+      navigator.wakeLock.release()
+        .then(() => setDebugInfo(prev => prev + "\nWake lock released"));
+    }
   };
 
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
       if (watchId !== null) {
         navigator.geolocation.clearWatch(watchId);
+        stopTracking();
       }
     };
   }, [watchId]);
@@ -118,7 +204,13 @@ const LocationTracker = () => {
 
   return (
     <div className="mx-auto px-4">
-      <h1 className="text-2xl font-bold text-center my-4">Location Tracker</h1>
+      <h1 className="text-2xl font-bold text-center my-4">Background Location Tracker</h1>
+
+      {!isBackgroundSupported && (
+        <div className="text-center p-4 text-yellow-500 mb-4">
+          Warning: Background location tracking may not be fully supported on this device
+        </div>
+      )}
 
       <div className="flex justify-center gap-4 mb-4">
         <button
@@ -146,12 +238,10 @@ const LocationTracker = () => {
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
         />
 
-        {path.length > 1 && <PolylineDecorator positions={path} />}
-
         {path.map((pos, index) => (
           <Marker 
             key={`${pos.lat}-${pos.lng}-${index}`} 
-            position={[pos.lat, pos.lng]} 
+            position={[pos.lat, pos.lng]}
             icon={getCustomMarkerIcon()}
           >
             <Popup>
@@ -168,20 +258,6 @@ const LocationTracker = () => {
       </MapContainer>
 
       <div className="mt-4 p-4 bg-gray-100 rounded">
-        <h2 className="font-semibold mb-2">Tracked Coordinates:</h2>
-        <div className="max-h-40 overflow-y-auto">
-          {path.map((pos, index) => (
-            <div key={index} className="text-sm">
-              Point {index + 1}: Lat: {pos.lat.toFixed(6)}, Lng: {pos.lng.toFixed(6)}, 
-              Accuracy: {pos.accuracy?.toFixed(2)}m, 
-              Time: {new Date(pos.timestamp).toLocaleTimeString()}
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Debug Information */}
-      <div className="mt-4 p-4 bg-gray-100 rounded">
         <h2 className="font-semibold mb-2">Debug Info:</h2>
         <pre className="text-xs whitespace-pre-wrap">
           {debugInfo}
@@ -191,39 +267,13 @@ const LocationTracker = () => {
   );
 };
 
-// AutoCenter component to keep the map centered on the latest position
+// Helper components (AutoCenter, PolylineDecorator, getCustomMarkerIcon) remain the same
 const AutoCenter = ({ position }) => {
   const map = useMap();
 
   useEffect(() => {
     map.setView(position);
   }, [map, position]);
-
-  return null;
-};
-
-const PolylineDecorator = ({ positions }) => {
-  const map = useMap();
-
-  useEffect(() => {
-    if (positions.length > 1) {
-      const polyline = L.polyline(positions, { color: "#0000ff", weight: 4 }).addTo(map);
-
-      L.polylineDecorator(polyline, {
-        patterns: [
-          {
-            offset: "5%",
-            repeat: "10%",
-            symbol: L.Symbol.dash({ pixelSize: 10, pathOptions: { color: "#ff0000", weight: 2 } }),
-          },
-        ],
-      }).addTo(map);
-
-      return () => {
-        map.removeLayer(polyline);
-      };
-    }
-  }, [positions, map]);
 
   return null;
 };
